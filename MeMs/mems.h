@@ -1,16 +1,13 @@
 /*
 All the main functions with respect to the MeMS are inplemented here
 read the function discription for more details
-
-NOTE: DO NOT CHANGE THE NAME OR SIGNATURE OF FUNCTIONS ALREADY PROVIDED
-you are only allowed to implement the functions
-you can also make additional helper functions a you wish
-
-REFER DOCUMENTATION FOR MORE DETAILS ON FUNSTIONS AND THEIR FUNCTIONALITY
+REFER DOCUMENTATION FOR MORE DETAILS ON FUNCTIONS AND THEIR FUNCTIONALITY
 */
+
 #include <stdio.h>
 #include <stdlib.h>
-// add other headers as required
+
+// added other headers as required
 #include <sys/mman.h>
 
 /*
@@ -19,28 +16,31 @@ As PAGESIZE can differ system to system we should have flexibility to modify thi
 macro to make the output of all system same and conduct a fair evaluation.
 */
 #define PAGE_SIZE 4096
+
+// added other macros as required
 #define HOLE 0
 #define PROCESS 1
 #define UNMAP_FAILED -1
+#define MEMS_VADDR_START 1000
 
-// Structure for Sub chain
+// Structure for Sub chain doubly linked list node
 
 typedef struct Sub_Node
 {
-    int type;       // 0-holes, 1-process
-    int vaddr_base; // start of virutal address of a sub_node
-    size_t size;    // size of memory segment(bytes)
+    int type;         // 0-holes, 1-process
+    void *vaddr_base; // start of virutal address of a sub_node
+    size_t size;      // size of memory segment(bytes)
     struct Sub_Node *prev;
     struct Sub_Node *next;
 } Sub_Node;
 
-// Structure for main chain
+// Structure for main chain doubly linked list node
 
 typedef struct Main_Node
 {
     int pages;        // No of pages  // size of main_node(bytes) = int pages * PAGE_SIZE
     void *paddr_base; // mems_physical_addr // virtual adderes given by mmap
-    int vaddr_base;   // = sub_chain_head->vaddr_base //  start of virutal address for main_node
+    void *vaddr_base; // = sub_chain_head->vaddr_base //  start of virutal address for main_node
     struct Sub_Node *sub_chain_head;
     struct Main_Node *prev;
     struct Main_Node *next;
@@ -71,7 +71,7 @@ void mems_init()
     free_list_page_address = mmap(NULL, FREE_LIST_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (free_list_page_address == MAP_FAILED)
     {
-        perror("mmap");
+        perror("map free list memory");
         exit(1);
     }
     free_list_memory_offset = free_list_page_address;
@@ -85,14 +85,14 @@ Returns: Nothing
 */
 void mems_finish()
 {
-
     Main_Node *cur_main_node = free_list;
     while (cur_main_node != NULL)
     {
-        int unmap = munmap(cur_main_node->paddr_base, (cur_main_node->pages) * PAGE_SIZE);
+        size_t cur_main_size = (cur_main_node->pages) * PAGE_SIZE;
+        int unmap = munmap(cur_main_node->paddr_base, cur_main_size);
         if (unmap == UNMAP_FAILED)
         {
-            perror("munmap");
+            perror("unmap user memory");
             exit(1);
         }
     }
@@ -152,7 +152,7 @@ void *allocate_process(Sub_Node *hole, size_t size)
         hole->next = remaining_hole;
         if (remaining_hole->next != NULL)
         {
-            remaining_hole->next->prev = remaining_hole;
+            remaining_hole->next->prev = remaining_hole; // addon
         }
 
         hole->type = PROCESS;
@@ -161,7 +161,7 @@ void *allocate_process(Sub_Node *hole, size_t size)
         // return (void *)hole->vaddr_base;
     }
 
-    return (void *)hole->vaddr_base;
+    return hole->vaddr_base;
 }
 
 void *mems_malloc(size_t size)
@@ -193,7 +193,7 @@ void *mems_malloc(size_t size)
         if (free_list == NULL) // if empty free list
         {
             new_main_node->prev = NULL;
-            new_main_node->vaddr_base = 0;
+            new_main_node->vaddr_base = (void *)MEMS_VADDR_START;
             free_list = new_main_node; // new main node = main chain head
         }
         else
@@ -215,6 +215,11 @@ void *mems_malloc(size_t size)
         new_main_node->sub_chain_head = new_head_hole;
 
         void *user_memory = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (user_memory == MAP_FAILED)
+        {
+            perror("map user memory");
+            exit(1);
+        }
         new_main_node->paddr_base = user_memory;
 
         main_chain_tail = new_main_node;
@@ -231,23 +236,87 @@ this function print the stats of the MeMS system like
 Parameter: Nothing
 Returns: Nothing but should print the necessary information on STDOUT
 */
+void mems_print_sub_node(Sub_Node *sub_node)
+{
+    if (sub_node == NULL)
+    {
+        printf("NULL");
+        return;
+    }
+    (sub_node->type == HOLE) ? printf("H") : printf("P");
+    void *sub_node_vaddr_bound = sub_node->vaddr_base + sub_node->size - 1;
+    // void* for my 64 bit system is represented in 8 bytes which size is equal to unsigned long
+    printf("[%lu:%lu]", (unsigned long)sub_node->vaddr_base, (unsigned long)sub_node_vaddr_bound);
+    return;
+}
+
+void mems_print_main_node(Main_Node *main_node)
+{
+    void *main_node_vaddr_bound = main_node->vaddr_base + (main_node->pages * PAGE_SIZE) - 1;
+    printf("MAIN[%lu:%lu]-> ", (unsigned long)main_node->vaddr_base, (unsigned long)main_node_vaddr_bound);
+    Sub_Node *cur_sub_node = main_node->sub_chain_head;
+    while (cur_sub_node != NULL)
+    {
+        mems_print_sub_node(cur_sub_node);
+        printf(" <-> ");
+        cur_sub_node = cur_sub_node->next;
+    }
+    mems_print_sub_node(cur_sub_node);
+    return;
+}
+
+void print_array(int a[], int len)
+{
+    printf("[");
+    for (int i = 0; i < len; i++)
+    {
+        printf("%d, ", a[i]);
+    }
+    printf("]\n");
+}
+
 void mems_print_stats()
 {
+    int main_chain_length = 0;
+    int pages_used = 0;
+    size_t space_unused = 0;
+    printf("------- MeMs SYSTEM STATS -------\n");
     Main_Node *cur_main_node = free_list;
-    int mainnode_count = 1;
     while (cur_main_node != NULL)
     {
+        mems_print_main_node(cur_main_node);
+        printf("\n");
+        main_chain_length++;
+        cur_main_node = cur_main_node->next;
+    }
+
+    int sub_chain_length_array[main_chain_length];
+    cur_main_node = free_list;
+    int i = 0;
+    while (cur_main_node != NULL)
+    {
+        pages_used += cur_main_node->pages;
         Sub_Node *cur_sub_node = cur_main_node->sub_chain_head;
-        int subnode_count = 1;
+        int sub_chain_length = 0;
         while (cur_sub_node != NULL)
         {
+            if (cur_sub_node->type == HOLE)
+            {
+                space_unused += cur_sub_node->size;
+            }
+            sub_chain_length++;
             cur_sub_node = cur_sub_node->next;
-            subnode_count++;
         }
+        sub_chain_length_array[i] = sub_chain_length;
+        i++;
         cur_main_node = cur_main_node->next;
-        mainnode_count++;
     }
-    cur_main_node = NULL;
+    printf("Pages used : %d\n", pages_used);
+    printf("Space unused : %lu\n", space_unused);
+    printf("Main Chain Length : %d\n", main_chain_length);
+    printf("Sub Chain Length array : ");
+    print_array(sub_chain_length_array, main_chain_length);
+    printf("---------------------------------\n");
 }
 
 /*
@@ -257,15 +326,86 @@ Returns: MeMS physical address mapped to the passed ptr (MeMS virtual address).
 */
 void *mems_get(void *v_ptr)
 {
-    int vaddr = (int)v_ptr;
+    Main_Node *cur_main_node = free_list;
+    while (cur_main_node != NULL)
+    {
+        size_t main_node_vgap = v_ptr - (cur_main_node->vaddr_base);
+        size_t cur_main_size = PAGE_SIZE * cur_main_node->pages;
+        if (main_node_vgap < cur_main_size) // main node for given virtual address is found
+        {
+            return cur_main_node->paddr_base + main_node_vgap;
+        }
+        cur_main_node = cur_main_node->next;
+    }
+    fprintf(stderr, "segementation fault\n");
+    exit(1);
 }
-
 /*
 this function free up the memory pointed by our virtual_address and add it to the free list
 Parameter: MeMS Virtual address (that is created by MeMS)
 Returns: nothing
 */
+
+Sub_Node *find_process_segement(void *v_ptr) // addon error
+{
+    Main_Node *cur_main_node = free_list;
+    while (cur_main_node != NULL)
+    {
+        size_t main_node_vgap = v_ptr - (cur_main_node->vaddr_base);
+        size_t cur_main_size = PAGE_SIZE * cur_main_node->pages;
+        if (main_node_vgap < cur_main_size) // main node for given virtual address is found
+        {
+            break;
+        }
+        cur_main_node = cur_main_node->next;
+    }
+    Sub_Node *cur_sub_node = cur_main_node->sub_chain_head;
+    while (cur_sub_node != NULL)
+    {
+        if ((cur_sub_node->vaddr_base == v_ptr))
+        {
+            return cur_sub_node;
+        }
+        cur_sub_node = cur_sub_node->next;
+    }
+    // error // process segment with vaddr_base == v_ptr not found
+    fprintf(stderr, "mems_free(): invalid pointer\nAborted (core dumped)");
+    exit(1);
+}
+
+void combine_nexthole(Sub_Node *hole_node) // handling fragmentation // if input subnode is hole and next subnode is also node it will combine them
+{
+    Sub_Node *next_hole_node = hole_node->next;
+    // error case
+    if (hole_node->type == PROCESS) // never gonna reach
+    {
+        fprintf(stderr, "node is process");
+        return;
+    }
+    // Edge Cases
+    if (next_hole_node == NULL)
+        return;
+    if (next_hole_node->type == PROCESS)
+        return;
+    // combine  // like deleting next hole node from sub chain
+    hole_node->next = next_hole_node->next;
+    if (next_hole_node->next != NULL)
+    {
+        next_hole_node->next->prev = hole_node;
+    }
+    hole_node->size += next_hole_node->size;
+    return;
+}
+
 void mems_free(void *v_ptr)
 {
-    int vaddr = (int)v_ptr;
+    Sub_Node *process_node = find_process_segement(v_ptr); // process segment corresponding to v_ptr
+    process_node->type = HOLE;                             // process node become hole node
+    combine_nexthole(process_node);
+    if (process_node->prev != NULL)
+    {
+        if (process_node->prev->type == HOLE)
+            combine_nexthole(process_node->prev);
+    }
+    return;
 }
