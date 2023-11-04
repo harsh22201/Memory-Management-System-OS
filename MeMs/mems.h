@@ -18,10 +18,11 @@ macro to make the output of all system same and conduct a fair evaluation.
 #define PAGE_SIZE 4096
 
 // added other macros as required
+
+#define MEMS_VADDR_START 1000 // Starting virtual addreass
 #define HOLE 0
 #define PROCESS 1
 #define UNMAP_FAILED -1
-#define MEMS_VADDR_START 1000
 
 // Structure for Sub chain doubly linked list node
 
@@ -49,12 +50,13 @@ typedef struct Main_Node
 const size_t SUB_NODE_SIZE = sizeof(Sub_Node);
 const size_t MAIN_NODE_SIZE = sizeof(Main_Node);
 
+// free list memory
+
 Main_Node *free_list; // free_list = main_chain_head
 Main_Node *main_chain_tail;
-void *free_list_page_address;  // address of page where free list is present
-void *free_list_memory_offset; // address(inside free list page) free to allocate a node (Main / Sub) in free list
-
-const size_t FREE_LIST_SIZE = 10 * PAGE_SIZE; // assuming max size free list occupy will be 10 * 4KB
+// void *free_list_page_address;  // address of page where free list is present
+void *free_list_memory_offset;        // address(inside free list page) free to allocate a node (Main / Sub) in free list
+size_t free_list_page_size_available; // size available in current page of free list memory
 
 /*
 Initializes all the required parameters for the MeMS system. The main parameters to be initialized are:
@@ -64,17 +66,23 @@ Initializes all the required parameters for the MeMS system. The main parameters
 Input Parameter: Nothing
 Returns: Nothing
 */
+void allocate_new_free_list_page() // new page for nodes if previous page is full // called when size available < size required
+{
+    free_list_memory_offset = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); // offset is new page
+    if (free_list_memory_offset == MAP_FAILED)
+    {
+        perror("map free list memory\n");
+        exit(1);
+    }
+    free_list_page_size_available = PAGE_SIZE; // new page is allocated
+}
+
 void mems_init()
 {
     free_list = NULL;
     main_chain_tail = NULL;
-    free_list_page_address = mmap(NULL, FREE_LIST_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (free_list_page_address == MAP_FAILED)
-    {
-        perror("map free list memory");
-        exit(1);
-    }
-    free_list_memory_offset = free_list_page_address;
+    free_list_memory_offset = NULL;
+    free_list_page_size_available = 0;
 }
 
 /*
@@ -95,8 +103,9 @@ void mems_finish()
             perror("unmap user memory");
             exit(1);
         }
+        cur_main_node = cur_main_node->next;
     }
-    // munmap(free_list_page_address, free_list_size);
+    // munmap(free_list_memory_offset, free_list_size);
 }
 
 /*
@@ -131,7 +140,7 @@ Sub_Node *find_hole(size_t size_req) // return NULL if size not found
     return NULL;
 }
 
-void *allocate_process(Sub_Node *hole, size_t size)
+void *allocate_process(Sub_Node *hole, size_t size) // (size) will be allocated to (hole) to become process and leave remaining hole
 {
     if (hole->size == size)
     {
@@ -140,8 +149,14 @@ void *allocate_process(Sub_Node *hole, size_t size)
     }
     else // (hole->size > size)
     {
+        if (free_list_page_size_available < SUB_NODE_SIZE)
+        {
+            allocate_new_free_list_page();
+        }
         Sub_Node *remaining_hole = (Sub_Node *)free_list_memory_offset; // creating a new hole node for unallocated segment
         free_list_memory_offset = (char *)free_list_memory_offset + SUB_NODE_SIZE;
+        // (char*)page casts offset to a char*, which treats it as a byte pointer.
+        free_list_page_size_available = free_list_page_size_available - SUB_NODE_SIZE;
 
         remaining_hole->prev = hole;
         remaining_hole->next = hole->next;
@@ -183,9 +198,17 @@ void *mems_malloc(size_t size)
 
         int total_pages = (size / PAGE_SIZE) + ((size % PAGE_SIZE) != 0); // total pages to allocated for new main node (used ceil to calculate)
 
+        if (free_list_page_size_available < MAIN_NODE_SIZE)
+        {
+            allocate_new_free_list_page();
+        }
+
+        // allocating new main node
         Main_Node *new_main_node = (Main_Node *)free_list_memory_offset;
         free_list_memory_offset = (char *)free_list_memory_offset + MAIN_NODE_SIZE;
         // (char*)page casts offset to a char*, which treats it as a byte pointer.
+        free_list_page_size_available = free_list_page_size_available - MAIN_NODE_SIZE;
+        //
 
         new_main_node->pages = total_pages;
         new_main_node->next = NULL;
@@ -203,8 +226,17 @@ void *mems_malloc(size_t size)
             main_chain_tail->next = new_main_node;
         }
 
+        if (free_list_page_size_available < SUB_NODE_SIZE)
+        {
+            allocate_new_free_list_page();
+        }
+
+        // allocating new head hole when  new main node is formed
         Sub_Node *new_head_hole = (Sub_Node *)free_list_memory_offset;
         free_list_memory_offset = (char *)free_list_memory_offset + SUB_NODE_SIZE;
+        // (char*)page casts offset to a char*, which treats it as a byte pointer.
+        free_list_page_size_available = free_list_page_size_available - SUB_NODE_SIZE;
+        //
 
         new_head_hole->prev = NULL;
         new_head_hole->next = NULL;
@@ -214,6 +246,7 @@ void *mems_malloc(size_t size)
 
         new_main_node->sub_chain_head = new_head_hole;
 
+        //  allocating memory for user
         void *user_memory = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (user_memory == MAP_FAILED)
         {
@@ -221,6 +254,7 @@ void *mems_malloc(size_t size)
             exit(1);
         }
         new_main_node->paddr_base = user_memory;
+        //
 
         main_chain_tail = new_main_node;
 
@@ -346,7 +380,7 @@ Parameter: MeMS Virtual address (that is created by MeMS)
 Returns: nothing
 */
 
-Sub_Node *find_process_segement(void *v_ptr) // addon error
+Sub_Node *find_process_segement(void *v_ptr) // find process node whose vaddr_base = v_ptr
 {
     Main_Node *cur_main_node = free_list;
     while (cur_main_node != NULL)
@@ -359,17 +393,22 @@ Sub_Node *find_process_segement(void *v_ptr) // addon error
         }
         cur_main_node = cur_main_node->next;
     }
+    if (cur_main_node == NULL)
+    {
+        fprintf(stderr, "mems_free(): invalid virtual pointer\nAborted (core dumped)\n");
+        exit(1);
+    }
     Sub_Node *cur_sub_node = cur_main_node->sub_chain_head;
     while (cur_sub_node != NULL)
     {
-        if ((cur_sub_node->vaddr_base == v_ptr))
+        if ((cur_sub_node->vaddr_base == v_ptr) && (cur_sub_node->type == PROCESS))
         {
             return cur_sub_node;
         }
         cur_sub_node = cur_sub_node->next;
     }
     // error // process segment with vaddr_base == v_ptr not found
-    fprintf(stderr, "mems_free(): invalid pointer\nAborted (core dumped)");
+    fprintf(stderr, "mems_free(): invalid virtual pointer\nAborted (core dumped)\n");
     exit(1);
 }
 
@@ -379,7 +418,7 @@ void combine_nexthole(Sub_Node *hole_node) // handling fragmentation // if input
     // error case
     if (hole_node->type == PROCESS) // never gonna reach
     {
-        fprintf(stderr, "node is process");
+        fprintf(stderr, "node is process\n");
         return;
     }
     // Edge Cases
@@ -397,7 +436,7 @@ void combine_nexthole(Sub_Node *hole_node) // handling fragmentation // if input
     return;
 }
 
-void mems_free(void *v_ptr)
+void mems_free(void *v_ptr) // v_ptr can only be  pointer values which were returned by mems_malloc
 {
     Sub_Node *process_node = find_process_segement(v_ptr); // process segment corresponding to v_ptr
     process_node->type = HOLE;                             // process node become hole node
