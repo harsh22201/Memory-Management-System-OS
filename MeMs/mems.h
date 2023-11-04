@@ -21,14 +21,15 @@ macro to make the output of all system same and conduct a fair evaluation.
 #define PAGE_SIZE 4096
 #define HOLE 0
 #define PROCESS 1
+#define UNMAP_FAILED -1
 
 // Structure for Sub chain
 
 typedef struct Sub_Node
 {
-    int type; // 0-holes, 1-process
-    int base;
-    size_t size; // size of memory segment(bytes)
+    int type;       // 0-holes, 1-process
+    int vaddr_base; // start of virutal address of a sub_node
+    size_t size;    // size of memory segment(bytes)
     struct Sub_Node *prev;
     struct Sub_Node *next;
 } Sub_Node;
@@ -37,9 +38,10 @@ typedef struct Sub_Node
 
 typedef struct Main_Node
 {
-    int pages; // No of pages  // size of main_node(bytes) = int pages * PAGE_SIZE
-    int base;
-    Sub_Node *sub_chain_head;
+    int pages;        // No of pages  // size of main_node(bytes) = int pages * PAGE_SIZE
+    void *paddr_base; // mems_physical_addr // virtual adderes given by mmap
+    int vaddr_base;   // = sub_chain_head->vaddr_base //  start of virutal address for main_node
+    struct Sub_Node *sub_chain_head;
     struct Main_Node *prev;
     struct Main_Node *next;
 } Main_Node;
@@ -83,6 +85,17 @@ Returns: Nothing
 */
 void mems_finish()
 {
+
+    Main_Node *cur_main_node = free_list;
+    while (cur_main_node != NULL)
+    {
+        int unmap = munmap(cur_main_node->paddr_base, (cur_main_node->pages) * PAGE_SIZE);
+        if (unmap == UNMAP_FAILED)
+        {
+            perror("munmap");
+            exit(1);
+        }
+    }
     // munmap(free_list_page_address, free_list_size);
 }
 
@@ -118,23 +131,23 @@ Sub_Node *find_hole(size_t size_req) // return NULL if size not found
     return NULL;
 }
 
-void *allocate_hole(Sub_Node *hole, size_t size)
+void *allocate_process(Sub_Node *hole, size_t size)
 {
     if (hole->size == size)
     {
         hole->type = PROCESS;
-        ; // adddon
+        // return (void *)hole->vaddr_base;
     }
     else // (hole->size > size)
     {
         Sub_Node *remaining_hole = (Sub_Node *)free_list_memory_offset; // creating a new hole node for unallocated segment
         free_list_memory_offset = (char *)free_list_memory_offset + SUB_NODE_SIZE;
 
-        remaning_hole->prev = hole;
-        remaning_hole->next = hole->next;
-        remaning_hole->type = HOLE;
-        remaning_hole->base = hole->base + size;
-        remaning_hole->size = hole->size - size;
+        remaining_hole->prev = hole;
+        remaining_hole->next = hole->next;
+        remaining_hole->type = HOLE;
+        remaining_hole->vaddr_base = (hole->vaddr_base) + size;
+        remaining_hole->size = (hole->size) - size;
 
         hole->next = remaining_hole;
         if (remaining_hole->next != NULL)
@@ -142,8 +155,13 @@ void *allocate_hole(Sub_Node *hole, size_t size)
             remaining_hole->next->prev = remaining_hole;
         }
 
-        ; // addon
+        hole->type = PROCESS;
+        hole->size = size;
+
+        // return (void *)hole->vaddr_base;
     }
+
+    return (void *)hole->vaddr_base;
 }
 
 void *mems_malloc(size_t size)
@@ -158,30 +176,32 @@ void *mems_malloc(size_t size)
     Sub_Node *free_hole = find_hole(size);
     if (free_hole != NULL) // free hole founded // make free_hole node process node
     {
-        return allocate_hole(free_hole, size);
+        return allocate_process(free_hole, size);
     }
     else // (free_hole == NULL) //  free hole not founded // add new main node
     {
+
+        int total_pages = (size / PAGE_SIZE) + ((size % PAGE_SIZE) != 0); // total pages to allocated for new main node (used ceil to calculate)
+
         Main_Node *new_main_node = (Main_Node *)free_list_memory_offset;
         free_list_memory_offset = (char *)free_list_memory_offset + MAIN_NODE_SIZE;
         // (char*)page casts offset to a char*, which treats it as a byte pointer.
 
-        if (free_list == NULL)
+        new_main_node->pages = total_pages;
+        new_main_node->next = NULL;
+
+        if (free_list == NULL) // if empty free list
         {
             new_main_node->prev = NULL;
-            free_list = new_main_node;
+            new_main_node->vaddr_base = 0;
+            free_list = new_main_node; // new main node = main chain head
         }
         else
         {
             new_main_node->prev = main_chain_tail;
+            new_main_node->vaddr_base = (main_chain_tail->vaddr_base) + (main_chain_tail->pages * PAGE_SIZE);
             main_chain_tail->next = new_main_node;
         }
-
-        new_main_node->next = NULL;
-        main_chain_tail = new_main_node;
-
-        int total_pages = (size / PAGE_SIZE) + 1; // total pages to allocated for new main node(ideally should use ceil to calculate )
-        new_main_node->pages = total_pages;
 
         Sub_Node *new_head_hole = (Sub_Node *)free_list_memory_offset;
         free_list_memory_offset = (char *)free_list_memory_offset + SUB_NODE_SIZE;
@@ -189,13 +209,17 @@ void *mems_malloc(size_t size)
         new_head_hole->prev = NULL;
         new_head_hole->next = NULL;
         new_head_hole->type = HOLE;
-        new_head_hole->base = 0;
         new_head_hole->size = total_pages * PAGE_SIZE;
+        new_head_hole->vaddr_base = new_main_node->vaddr_base;
 
         new_main_node->sub_chain_head = new_head_hole;
 
-        // void *user_memory = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        // new_main_node->base = user_memory;
+        void *user_memory = mmap(NULL, total_pages * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        new_main_node->paddr_base = user_memory;
+
+        main_chain_tail = new_main_node;
+
+        return allocate_process(new_main_node->sub_chain_head, size);
     }
 }
 
@@ -233,6 +257,7 @@ Returns: MeMS physical address mapped to the passed ptr (MeMS virtual address).
 */
 void *mems_get(void *v_ptr)
 {
+    int vaddr = (int)v_ptr;
 }
 
 /*
@@ -242,4 +267,5 @@ Returns: nothing
 */
 void mems_free(void *v_ptr)
 {
+    int vaddr = (int)v_ptr;
 }
