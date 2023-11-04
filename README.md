@@ -73,7 +73,7 @@ Any time the user process wants to write/store anything to the heap, it has to m
    Parameter: Nothing  
    Returns: Nothing but should print the necessary information on STDOUT
 
-6. void *mems_get(void*v_ptr): Returns the MeMS physical address mapped to ptr ( ptr is MeMS virtual address).  
+6. void \*mems_get(void\* v_ptr): Returns the MeMS physical address mapped to ptr ( ptr is MeMS virtual address).  
    Parameter: MeMS Virtual address (that is created by MeMS)  
    Returns: MeMS physical address mapped to the passed ptr (MeMS virtual address).
 
